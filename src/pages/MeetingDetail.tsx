@@ -47,6 +47,20 @@ const sentimentConfig: Record<string, { label: string; color: string; emoji: str
   negativo: { label: "Negativo", color: "text-destructive", emoji: "😟" },
 };
 
+interface Analysis {
+  summary: string;
+  tasks: { text: string; assignee?: string; priority: string; due_date?: string; done?: boolean }[];
+  decisions: { text: string; participants?: string[] }[];
+  risks: { text: string; severity: string }[];
+  sentiment: string;
+  key_data: { label: string; value: string }[];
+  tags: string[];
+  calendar_events: { title: string; date: string; time?: string; duration_minutes?: number; description?: string }[];
+  progress?: number;
+  total?: number;
+  status?: string;
+}
+
 interface MeetingData {
   id: string;
   title: string;
@@ -61,7 +75,60 @@ interface MeetingData {
   chunk_paths?: string[] | null;
   file_size?: number | null;
 }
-...
+
+export default function MeetingDetail() {
+  const { id } = useParams();
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const drive = useGoogleDrive();
+  const [meeting, setMeeting] = useState<MeetingData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [exportingDrive, setExportingDrive] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [title, setTitle] = useState("");
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+
+  const analysis: Analysis | null = meeting?.ai_summary ? (() => {
+    try { return JSON.parse(meeting.ai_summary); } catch { return null; }
+  })() : null;
+
+  const sentiment = sentimentConfig[analysis?.sentiment || "neutral"];
+
+  const progress = analysis?.progress || null;
+  const isChunkProcessing = progress && analysis?.total && analysis?.total > 1;
+
+  useEffect(() => {
+    fetchMeeting();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, user]);
+
+  async function fetchMeeting() {
+    if (!user || !id) return;
+    setLoading(true);
+    const { data, error } = await supabase
+      .from("meetings")
+      .select("*")
+      .eq("id", id)
+      .single();
+
+    if (error || !data) {
+      toast.error("Reunión no encontrada");
+      navigate("/meetings");
+      return;
+    }
+    setMeeting(data as MeetingData);
+    setTitle(data.title);
+
+    if (data.file_path) {
+      const { data: urlData } = await supabase.storage
+        .from("recordings")
+        .createSignedUrl(data.file_path, 3600);
+      if (urlData) setAudioUrl(urlData.signedUrl);
+    }
+    setLoading(false);
+  }
+
   async function handleReanalyze() {
     if (!meeting) return;
 
