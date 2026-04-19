@@ -6,9 +6,9 @@ const corsHeaders = {
 };
 
 const MAX_RETRIES = 2;
-// Files larger than this go through chunked base64 (in MB).
-// Smaller files use a single signed-URL request (no memory blow-up).
-const INLINE_BASE64_LIMIT_MB = 8;
+// Hard cap: beyond this we refuse rather than risk OOM in the worker (~256MB RAM).
+// 30MB raw audio -> ~40MB base64; safe to keep in memory once.
+const MAX_FILE_MB = 30;
 
 interface AnalysisResult {
   transcript: string;
