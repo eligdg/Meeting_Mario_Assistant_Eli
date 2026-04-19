@@ -221,11 +221,17 @@ Deno.serve(async (req) => {
 
     const buf = new Uint8Array(await fileData.arrayBuffer());
     let binary = "";
-    const chunkSize = 8192;
+    const chunkSize = 32768;
     for (let i = 0; i < buf.length; i += chunkSize) {
-      binary += String.fromCharCode.apply(null, Array.from(buf.subarray(i, i + chunkSize)));
+      const sub = buf.subarray(i, Math.min(i + chunkSize, buf.length));
+      // Build a small string per chunk without creating an Array (saves memory).
+      let s = "";
+      for (let j = 0; j < sub.length; j++) s += String.fromCharCode(sub[j]);
+      binary += s;
     }
-    const imageUrl = `data:${mimeType};base64,${btoa(binary)}`;
+    const b64 = btoa(binary);
+    binary = ""; // free
+    const imageUrl = `data:${mimeType};base64,${b64}`;
 
     const result = await callAI(imageUrl, today, LOVABLE_API_KEY);
 
