@@ -1,0 +1,1 @@
+UPDATE public.meetings SET status='pending' WHERE id='37bdbf9e-3716-49c9-a98c-b175322f7cba';
