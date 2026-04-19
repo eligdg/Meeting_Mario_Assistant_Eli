@@ -10,40 +10,30 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType>({
-  user: { id: "demo-user" } as User,
+  user: null,
   session: null,
-  loading: false,
+  loading: true,
   signOut: async () => {},
 });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<Session | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const initAuth = async () => {
-      setLoading(true);
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (session) {
-          setSession(session);
-          setUser(session.user);
-        } else {
-          setUser({ id: "demo-user" } as User);
-        }
-      } catch {
-        setUser({ id: "demo-user" } as User);
-      } finally {
-        setLoading(false);
-      }
-    };
+    // 1) Subscribe FIRST to avoid missing events
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+      setUser(newSession?.user ?? null);
+      setLoading(false);
+    });
 
-    initAuth();
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      setUser(session?.user ?? null);
+    // 2) Then restore existing session from storage
+    supabase.auth.getSession().then(({ data: { session: existingSession } }) => {
+      setSession(existingSession);
+      setUser(existingSession?.user ?? null);
+      setLoading(false);
     });
 
     return () => subscription.unsubscribe();
@@ -51,6 +41,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = async () => {
     await supabase.auth.signOut();
+    setUser(null);
+    setSession(null);
   };
 
   return (
