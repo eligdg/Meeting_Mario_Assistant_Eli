@@ -77,8 +77,8 @@ export async function compressAndChunk(
   ff.off("progress", progressHandler);
 
   onProgress("Leyendo audio comprimido...", 88);
-  const data = await ff.readFile(outputName);
-  const compressedBlob = new Blob([data], { type: "audio/mpeg" });
+  const data = (await ff.readFile(outputName)) as Uint8Array;
+  const compressedBlob = new Blob([data.buffer as ArrayBuffer], { type: "audio/mpeg" });
 
   // Cleanup
   try { await ff.deleteFile(inputName); } catch { /* ignore */ }
