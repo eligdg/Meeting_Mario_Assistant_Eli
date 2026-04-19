@@ -196,45 +196,36 @@ Deno.serve(async (req) => {
     const today = new Date().toISOString().split("T")[0];
     const mimeType = meeting.mime_type || "audio/webm";
 
-    let imageUrl: string;
-
-    if (fileSizeMB > 0 && fileSizeMB <= INLINE_BASE64_LIMIT_MB) {
-      // Small file: download and inline as base64
-      const { data: fileData, error: fileError } = await supabase.storage
-        .from("recordings")
-        .download(meeting.file_path);
-
-      if (fileError || !fileData) {
-        await supabase.from("meetings").update({ status: "error" }).eq("id", meeting_id);
-        return new Response(JSON.stringify({ error: "Could not download file" }), {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-
-      const buf = new Uint8Array(await fileData.arrayBuffer());
-      let binary = "";
-      const chunkSize = 8192;
-      for (let i = 0; i < buf.length; i += chunkSize) {
-        binary += String.fromCharCode.apply(null, Array.from(buf.subarray(i, i + chunkSize)));
-      }
-      imageUrl = `data:${mimeType};base64,${btoa(binary)}`;
-    } else {
-      // Large file: pass a signed URL so the AI gateway streams it (no memory load)
-      const { data: signed, error: signedErr } = await supabase.storage
-        .from("recordings")
-        .createSignedUrl(meeting.file_path, 60 * 60); // 1 hour
-
-      if (signedErr || !signed?.signedUrl) {
-        console.error("Signed URL error:", signedErr);
-        await supabase.from("meetings").update({ status: "error" }).eq("id", meeting_id);
-        return new Response(JSON.stringify({ error: "Could not create signed URL" }), {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      imageUrl = signed.signedUrl;
+    if (fileSizeMB > MAX_FILE_MB) {
+      await supabase.from("meetings").update({ status: "error" }).eq("id", meeting_id);
+      return new Response(
+        JSON.stringify({
+          error: `Archivo demasiado grande (${fileSizeMB.toFixed(1)} MB). Máximo soportado: ${MAX_FILE_MB} MB. Comprime el audio antes de subirlo.`,
+        }),
+        { status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
+
+    // Download and inline as base64 data URL (Gemini accepts audio in data URLs)
+    const { data: fileData, error: fileError } = await supabase.storage
+      .from("recordings")
+      .download(meeting.file_path);
+
+    if (fileError || !fileData) {
+      await supabase.from("meetings").update({ status: "error" }).eq("id", meeting_id);
+      return new Response(JSON.stringify({ error: "Could not download file" }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    const buf = new Uint8Array(await fileData.arrayBuffer());
+    let binary = "";
+    const chunkSize = 8192;
+    for (let i = 0; i < buf.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, Array.from(buf.subarray(i, i + chunkSize)));
+    }
+    const imageUrl = `data:${mimeType};base64,${btoa(binary)}`;
 
     const result = await callAI(imageUrl, today, LOVABLE_API_KEY);
 
