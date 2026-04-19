@@ -69,6 +69,9 @@ interface Analysis {
   key_data: { label: string; value: string }[];
   tags: string[];
   calendar_events: { title: string; date: string; time?: string; duration_minutes?: number; description?: string }[];
+  progress?: number;
+  total?: number;
+  status?: string;
 }
 
 export default function MeetingDetail() {

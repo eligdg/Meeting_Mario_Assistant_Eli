@@ -31,12 +31,13 @@ export function RecordingPanel() {
       toast({ title: "Iniciando grabación..." });
       chunksRef.current = [];
 
+      let stream: MediaStream;
       if (mode === "screen") {
-        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
         streamRef.current = stream;
         const recorder = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp9" });
         mediaRecorderRef.current = recorder;
-        
+
         recorder.ondataavailable = (e) => {
           if (e.data.size > 0) chunksRef.current.push(e.data);
         };
@@ -44,11 +45,11 @@ export function RecordingPanel() {
         recorder.start(1000);
         setRecordingMode("screen");
       } else {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         streamRef.current = stream;
         const recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
         mediaRecorderRef.current = recorder;
-        
+
         recorder.ondataavailable = (e) => {
           if (e.data.size > 0) chunksRef.current.push(e.data);
         };
@@ -60,8 +61,9 @@ export function RecordingPanel() {
       setIsRecording(true);
       setRecordingTime(0);
       timerRef.current = setInterval(() => setRecordingTime(t => t + 1), 1000);
-      
-      stream.getVideoTracks()[0]?.onended = () => stopRecording();
+
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) videoTrack.onended = () => stopRecording();
     } catch (err: any) {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     }
@@ -101,28 +103,46 @@ export function RecordingPanel() {
     setUploading(true);
 
     try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("No autenticado");
+
       const ext = mimeType.includes("video") ? "webm" : "webm";
       const fileName = `recording-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
-      const filePath = fileName;
+      const filePath = `${user.id}/${fileName}`;
 
       const { error: uploadError } = await supabase.storage
         .from("recordings")
-        .upload(filePath, file);
+        .upload(filePath, file, { contentType: mimeType });
 
       if (uploadError) throw uploadError;
 
       const duration = recordingMode ? recordingTime : Math.round((file.size / 1024 / 1024) * 2);
-      
-      const { error: dbError } = await supabase.from("recordings").insert({
-        filename: title || `Recording ${new Date().toLocaleDateString()}`,
-        type: mimeType,
-        url: filePath,
-        duration_secs: duration,
-      });
+      const meetingTitle = title || `Grabación ${new Date().toLocaleString("es-ES")}`;
+
+      const { data: meeting, error: dbError } = await supabase
+        .from("meetings")
+        .insert({
+          user_id: user.id,
+          title: meetingTitle,
+          recording_type: recordingMode === "screen" ? "screen" : "mic",
+          file_path: filePath,
+          file_size: file.size,
+          mime_type: mimeType,
+          duration_seconds: duration,
+          status: "pending",
+        })
+        .select()
+        .single();
 
       if (dbError) throw dbError;
 
-      toast({ title: "Archivo subido", description: "Listo para analizar" });
+      toast({ title: "Archivo subido", description: "Iniciando análisis con IA..." });
+
+      // Trigger AI analysis automatically
+      supabase.functions.invoke("analyze-meeting", {
+        body: { meeting_id: meeting.id },
+      }).catch((e) => console.error("Analyze trigger failed:", e));
+
       setSelectedFile(null);
       setTitle("");
     } catch (err: any) {
