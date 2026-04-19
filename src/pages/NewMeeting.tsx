@@ -149,7 +149,7 @@ export default function NewMeeting() {
           console.error("AI analysis error:", aiError);
           toast.error("Error en el análisis IA");
         } else {
-          toast.success("Análisis completado", { description: "Resumen, tareas y eventos creados automáticamente." });
+          toast.success("Análisis iniciado", { description: "Resumen, tareas y eventos se generarán cuando termine el proceso." });
         }
       });
 

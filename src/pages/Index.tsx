@@ -161,7 +161,7 @@ export default function Index() {
         body: { meeting_id: meetingData.id },
       }).then(({ error }) => {
         if (error) toast.error("Error en el análisis IA");
-        else toast.success("Análisis completado");
+        else toast.success("Análisis iniciado", { description: "Se está procesando en segundo plano." });
       });
 
       recorder.clearRecording();

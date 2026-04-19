@@ -58,85 +58,30 @@ interface MeetingData {
   mime_type: string | null;
   transcript: string | null;
   ai_summary: string | null;
+  chunk_paths?: string[] | null;
+  file_size?: number | null;
 }
-
-interface Analysis {
-  summary: string;
-  tasks: { text: string; assignee?: string; priority: string; due_date?: string; done?: boolean }[];
-  decisions: { text: string; participants?: string[] }[];
-  risks: { text: string; severity: string }[];
-  sentiment: string;
-  key_data: { label: string; value: string }[];
-  tags: string[];
-  calendar_events: { title: string; date: string; time?: string; duration_minutes?: number; description?: string }[];
-  progress?: number;
-  total?: number;
-  status?: string;
-}
-
-export default function MeetingDetail() {
-  const { id } = useParams();
-  const { user } = useAuth();
-  const navigate = useNavigate();
-  const drive = useGoogleDrive();
-  const [meeting, setMeeting] = useState<MeetingData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [exportingDrive, setExportingDrive] = useState(false);
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [title, setTitle] = useState("");
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
-
-  const analysis: Analysis | null = meeting?.ai_summary ? (() => {
-    try { return JSON.parse(meeting.ai_summary); } catch { return null; }
-  })() : null;
-
-  const sentiment = sentimentConfig[analysis?.sentiment || "neutral"];
-  
-  const progress = analysis?.progress || null;
-  const isChunkProcessing = progress && analysis?.total && analysis?.total > 1;
-
-  useEffect(() => {
-    fetchMeeting();
-  }, [id, user]);
-
-  async function fetchMeeting() {
-    if (!user || !id) return;
-    setLoading(true);
-    const { data, error } = await supabase
-      .from("meetings")
-      .select("*")
-      .eq("id", id)
-      .single();
-
-    if (error || !data) {
-      toast.error("Reunión no encontrada");
-      navigate("/meetings");
-      return;
-    }
-    setMeeting(data as MeetingData);
-    setTitle(data.title);
-
-    // Get audio URL
-    if (data.file_path) {
-      const { data: urlData } = await supabase.storage
-        .from("recordings")
-        .createSignedUrl(data.file_path, 3600);
-      if (urlData) setAudioUrl(urlData.signedUrl);
-    }
-    setLoading(false);
-  }
-
+...
   async function handleReanalyze() {
     if (!meeting) return;
+
+    const isLegacyLargeUpload = (!meeting.chunk_paths || meeting.chunk_paths.length === 0)
+      && (meeting.file_size || 0) > 8 * 1024 * 1024;
+
+    if (isLegacyLargeUpload) {
+      toast.error("Esta grabación es anterior al sistema por partes", {
+        description: "Para analizarla sin errores, vuelve a subir el archivo desde el cargador actual para que se comprima y trocee automáticamente.",
+      });
+      return;
+    }
+
     setAnalyzing(true);
     try {
       const { error } = await supabase.functions.invoke("analyze-meeting", {
         body: { meeting_id: meeting.id },
       });
       if (error) throw error;
-      toast.success("Análisis completado");
+      toast.success("Análisis iniciado", { description: "La grabación se está procesando en segundo plano." });
       await fetchMeeting();
     } catch (err: any) {
       toast.error("Error en el análisis", { description: err.message });
