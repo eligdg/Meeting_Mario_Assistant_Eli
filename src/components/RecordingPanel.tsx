@@ -4,13 +4,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/use-toast";
-import { useNavigate } from "react-router-dom";
 
 export function RecordingPanel() {
-  const { user } = useAuth();
-  const navigate = useNavigate();
   const { toast } = useToast();
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
@@ -94,7 +90,7 @@ export function RecordingPanel() {
     const isValid = validTypes.some(t => file.type.startsWith(t));
     
     if (!isValid) {
-      toast({ title: "Archivo inválido", description: "Solo se aceptan archivos de audio o vídeo (MP3, WAV, MP4, WebM)", variant: "destructive" });
+      toast({ title: "Archivo inválido", description: "Solo audio/vídeo (MP3, WAV, MP4, WebM)", variant: "destructive" });
       return;
     }
     
@@ -102,13 +98,12 @@ export function RecordingPanel() {
   };
 
   const uploadFile = async (file: Blob, mimeType: string) => {
-    if (!user) return;
     setUploading(true);
 
     try {
       const ext = mimeType.includes("video") ? "webm" : "webm";
-      const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
-      const filePath = `${user.id}/${fileName}`;
+      const fileName = `recording-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+      const filePath = fileName;
 
       const { error: uploadError } = await supabase.storage
         .from("recordings")
@@ -116,30 +111,24 @@ export function RecordingPanel() {
 
       if (uploadError) throw uploadError;
 
-      const { data: { publicUrl } } = supabase.storage.from("recordings").getPublicUrl(filePath);
-      
       const duration = recordingMode ? recordingTime : Math.round((file.size / 1024 / 1024) * 2);
       
-      const { error: dbError } = await supabase.from("meetings").insert({
-        user_id: user.id,
-        title: title || `Reunión ${new Date().toLocaleDateString()}`,
-        recording_type: recordingMode || (mimeType.startsWith("video") ? "screen" : "mic"),
-        file_path: filePath,
-        mime_type: mimeType,
-        duration_seconds: duration,
-        status: "pending",
+      const { error: dbError } = await supabase.from("recordings").insert({
+        filename: title || `Recording ${new Date().toLocaleDateString()}`,
+        type: mimeType,
+        url: filePath,
+        duration_secs: duration,
       });
 
       if (dbError) throw dbError;
 
-      toast({ title: "Archivo subido", description: "Ahora puedes analizarlo con IA" });
-      navigate("/meetings");
+      toast({ title: "Archivo subido", description: "Listo para analizar" });
+      setSelectedFile(null);
+      setTitle("");
     } catch (err: any) {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     } finally {
       setUploading(false);
-      setSelectedFile(null);
-      setTitle("");
     }
   };
 
@@ -152,8 +141,8 @@ export function RecordingPanel() {
   };
 
   return (
-    <div className="glass-card rounded-xl p-6 animate-slide-up">
-      <h2 className="text-lg font-semibold text-foreground mb-4">Grabar o importar</h2>
+    <div className="glass-card rounded-xl p-6">
+      <h2 className="text-lg font-semibold mb-4">Grabar o importar</h2>
 
       <div className="flex flex-col items-center gap-4 py-6">
         <div className="flex gap-3">
@@ -162,23 +151,11 @@ export function RecordingPanel() {
             className={cn(
               "w-16 h-16 rounded-full flex items-center justify-center transition-all",
               isRecording && recordingMode === "mic"
-                ? "bg-destructive shadow-lg"
-                : "bg-primary hover:shadow-lg hover:scale-105"
+                ? "bg-destructive"
+                : "bg-primary hover:scale-105"
             )}
           >
             {isRecording && recordingMode === "mic" ? <Square className="h-6 w-6" /> : <Mic className="h-6 w-6" />}
-          </button>
-          <button
-            onClick={() => isRecording ? stopRecording() : startRecording("screen")}
-            className={cn(
-              "w-16 h-16 rounded-full flex items-center justify-center transition-all",
-              isRecording && recordingMode === "screen"
-                ? "bg-destructive shadow-lg"
-                : "bg-secondary hover:shadow-lg hover:scale-105"
-            )}
-            disabled
-          >
-            {isRecording && recordingMode === "screen" ? <Square className="h-6 w-6" /> : <FileAudio className="h-6 w-6" />}
           </button>
         </div>
 
@@ -215,8 +192,8 @@ export function RecordingPanel() {
           </div>
         ) : (
           <>
-            <p className="text-sm font-medium">Arrastra un archivo aquí</p>
-            <p className="text-xs text-muted-foreground">MP3, WAV, MP4, WebM — solo audio/vídeo</p>
+            <p className="text-sm font-medium">Arrastra un archivo</p>
+            <p className="text-xs text-muted-foreground">MP3, WAV, MP4, WebM</p>
           </>
         )}
         <input
@@ -230,10 +207,9 @@ export function RecordingPanel() {
 
       <div className="mt-4 space-y-3">
         <Input 
-          placeholder="Nombre de la reunión (opcional)" 
+          placeholder="Nombre (opcional)" 
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          className="bg-background"
         />
         <Button 
           className="w-full" 
