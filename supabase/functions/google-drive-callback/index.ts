@@ -59,6 +59,7 @@ serve(async (req) => {
       headers: { Location: redirectUrl },
     });
   } catch (error: any) {
-    return new Response(`Error: ${error.message}`, { status: 500 });
+    console.error("Google Drive callback error:", error);
+    return new Response("Authentication failed", { status: 500 });
   }
 });
