@@ -234,15 +234,15 @@ Deno.serve(async (req) => {
     const mimeType = meeting.mime_type || "audio/mpeg";
     const results: AnalysisResult[] = [];
 
+    // Build the list of (blob, label) pairs to analyze.
+    // For legacy meetings with a single oversized file, split the bytes into
+    // sub-chunks here so they fit in the AI gateway memory budget.
+    type Piece = { blob: Blob; label: string };
+    const pieces: Piece[] = [];
+    const SUB_CHUNK_BYTES = Math.floor(MAX_CHUNK_MB * 1024 * 1024 * 0.85); // ~6.8 MB
+
     for (let i = 0; i < paths.length; i++) {
       const chunkPath = paths[i];
-      const partLabel = paths.length > 1 ? `[Parte ${i + 1} de ${paths.length}]` : "";
-
-      // Update progress in DB so the UI can show it
-      await supabase.from("meetings").update({
-        ai_summary: JSON.stringify({ progress: i, total: paths.length, status: "processing_chunk" }),
-      }).eq("id", meeting_id);
-
       const { data: fileData, error: fileError } = await supabase.storage
         .from("recordings")
         .download(chunkPath);
@@ -253,21 +253,51 @@ Deno.serve(async (req) => {
       }
 
       const sizeMB = fileData.size / 1024 / 1024;
-      if (sizeMB > MAX_CHUNK_MB) {
-        console.error(`Chunk ${i} too large: ${sizeMB.toFixed(1)} MB`);
-        continue;
+      if (sizeMB <= MAX_CHUNK_MB) {
+        const lbl = paths.length > 1 ? `[Parte ${i + 1} de ${paths.length}]` : "";
+        pieces.push({ blob: fileData, label: lbl });
+      } else {
+        // Legacy oversized file — split bytes into sub-pieces.
+        // NOTE: This is a byte split, not an audio-aware split. Gemini still
+        // transcribes most of the audio; first/last seconds of each piece may
+        // be garbled but the bulk of the content comes through.
+        const buf = new Uint8Array(await fileData.arrayBuffer());
+        const numSub = Math.ceil(buf.byteLength / SUB_CHUNK_BYTES);
+        console.log(`Chunk ${i} is ${sizeMB.toFixed(1)} MB — splitting into ${numSub} sub-pieces`);
+        for (let s = 0; s < numSub; s++) {
+          const start = s * SUB_CHUNK_BYTES;
+          const end = Math.min(start + SUB_CHUNK_BYTES, buf.byteLength);
+          const sub = buf.slice(start, end);
+          pieces.push({
+            blob: new Blob([sub], { type: mimeType }),
+            label: `[Parte ${s + 1} de ${numSub}]`,
+          });
+        }
       }
+    }
+
+    if (pieces.length === 0) {
+      await supabase.from("meetings").update({ status: "error" }).eq("id", meeting_id);
+      return new Response(JSON.stringify({ error: "No analyzable audio found" }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    for (let i = 0; i < pieces.length; i++) {
+      const { blob, label } = pieces[i];
+
+      await supabase.from("meetings").update({
+        ai_summary: JSON.stringify({ progress: i, total: pieces.length, status: "processing_chunk" }),
+      }).eq("id", meeting_id);
 
       try {
-        const dataUrl = await blobToBase64DataUrl(fileData, mimeType);
-        const result = await callAI(dataUrl, today, LOVABLE_API_KEY, partLabel);
+        const dataUrl = await blobToBase64DataUrl(blob, mimeType);
+        const result = await callAI(dataUrl, today, LOVABLE_API_KEY, label);
         if (result) results.push(result);
       } catch (e) {
-        console.error(`Chunk ${i} analysis failed:`, e);
+        console.error(`Piece ${i} analysis failed:`, e);
       }
-
-      // Force GC hint by clearing reference
-      // (Deno doesn't expose explicit gc, but losing references helps)
     }
 
     if (results.length === 0) {
