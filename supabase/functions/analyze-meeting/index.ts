@@ -8,7 +8,7 @@ const corsHeaders = {
 const MAX_RETRIES = 2;
 // Hard cap: beyond this we refuse rather than risk OOM in the worker (~256MB RAM).
 // 30MB raw audio -> ~40MB base64; safe to keep in memory once.
-const MAX_FILE_MB = 30;
+const MAX_FILE_MB = 8;
 
 interface AnalysisResult {
   transcript: string;
