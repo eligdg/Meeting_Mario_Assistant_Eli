@@ -1,12 +1,28 @@
-import { useState } from "react";
-import { Mic, Square, Upload, FileAudio } from "lucide-react";
+import { useState, useRef } from "react";
+import { Mic, Square, Upload, FileAudio, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/hooks/useAuth";
+import { useToast } from "@/hooks/use-toast";
+import { useNavigate } from "react-router-dom";
 
 export function RecordingPanel() {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const { toast } = useToast();
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
+  const [recordingMode, setRecordingMode] = useState<"screen" | "mic" | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [title, setTitle] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const formatTime = (s: number) => {
     const m = Math.floor(s / 60);
@@ -14,57 +30,218 @@ export function RecordingPanel() {
     return `${m.toString().padStart(2, "0")}:${sec.toString().padStart(2, "0")}`;
   };
 
+  const startRecording = async (mode: "screen" | "mic") => {
+    try {
+      toast({ title: "Iniciando grabación..." });
+      chunksRef.current = [];
+
+      if (mode === "screen") {
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        streamRef.current = stream;
+        const recorder = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp9" });
+        mediaRecorderRef.current = recorder;
+        
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) chunksRef.current.push(e.data);
+        };
+        recorder.onstop = handleRecordingComplete;
+        recorder.start(1000);
+        setRecordingMode("screen");
+      } else {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        streamRef.current = stream;
+        const recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
+        mediaRecorderRef.current = recorder;
+        
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) chunksRef.current.push(e.data);
+        };
+        recorder.onstop = handleRecordingComplete;
+        recorder.start(1000);
+        setRecordingMode("mic");
+      }
+
+      setIsRecording(true);
+      setRecordingTime(0);
+      timerRef.current = setInterval(() => setRecordingTime(t => t + 1), 1000);
+      
+      stream.getVideoTracks()[0]?.onended = () => stopRecording();
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    }
+  };
+
+  const stopRecording = () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (mediaRecorderRef.current?.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    setIsRecording(false);
+    setRecordingMode(null);
+  };
+
+  const handleRecordingComplete = async () => {
+    const blob = new Blob(chunksRef.current, { type: recordingMode === "screen" ? "video/webm" : "audio/webm" });
+    await uploadFile(blob, recordingMode === "screen" ? "video/webm" : "audio/webm");
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    const validTypes = ["audio/", "video/"];
+    const isValid = validTypes.some(t => file.type.startsWith(t));
+    
+    if (!isValid) {
+      toast({ title: "Archivo inválido", description: "Solo se aceptan archivos de audio o vídeo (MP3, WAV, MP4, WebM)", variant: "destructive" });
+      return;
+    }
+    
+    setSelectedFile(file);
+  };
+
+  const uploadFile = async (file: Blob, mimeType: string) => {
+    if (!user) return;
+    setUploading(true);
+
+    try {
+      const ext = mimeType.includes("video") ? "webm" : "webm";
+      const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+      const filePath = `${user.id}/${fileName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from("recordings")
+        .upload(filePath, file);
+
+      if (uploadError) throw uploadError;
+
+      const { data: { publicUrl } } = supabase.storage.from("recordings").getPublicUrl(filePath);
+      
+      const duration = recordingMode ? recordingTime : Math.round((file.size / 1024 / 1024) * 2);
+      
+      const { error: dbError } = await supabase.from("meetings").insert({
+        user_id: user.id,
+        title: title || `Reunión ${new Date().toLocaleDateString()}`,
+        recording_type: recordingMode || (mimeType.startsWith("video") ? "screen" : "mic"),
+        file_path: filePath,
+        mime_type: mimeType,
+        duration_seconds: duration,
+        status: "pending",
+      });
+
+      if (dbError) throw dbError;
+
+      toast({ title: "Archivo subido", description: "Ahora puedes analizarlo con IA" });
+      navigate("/meetings");
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setUploading(false);
+      setSelectedFile(null);
+      setTitle("");
+    }
+  };
+
+  const handleUpload = async () => {
+    if (!selectedFile) {
+      toast({ title: "Selecciona un archivo", variant: "destructive" });
+      return;
+    }
+    await uploadFile(selectedFile, selectedFile.type);
+  };
+
   return (
     <div className="glass-card rounded-xl p-6 animate-slide-up">
       <h2 className="text-lg font-semibold text-foreground mb-4">Grabar o importar</h2>
 
-      {/* Recording */}
       <div className="flex flex-col items-center gap-4 py-6">
-        <button
-          onClick={() => setIsRecording(!isRecording)}
-          className={cn(
-            "w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300",
-            isRecording
-              ? "bg-destructive text-destructive-foreground shadow-lg"
-              : "bg-primary text-primary-foreground hover:shadow-lg hover:scale-105"
-          )}
-        >
-          {isRecording ? <Square className="h-8 w-8" /> : <Mic className="h-8 w-8" />}
-        </button>
+        <div className="flex gap-3">
+          <button
+            onClick={() => isRecording ? stopRecording() : startRecording("mic")}
+            className={cn(
+              "w-16 h-16 rounded-full flex items-center justify-center transition-all",
+              isRecording && recordingMode === "mic"
+                ? "bg-destructive shadow-lg"
+                : "bg-primary hover:shadow-lg hover:scale-105"
+            )}
+          >
+            {isRecording && recordingMode === "mic" ? <Square className="h-6 w-6" /> : <Mic className="h-6 w-6" />}
+          </button>
+          <button
+            onClick={() => isRecording ? stopRecording() : startRecording("screen")}
+            className={cn(
+              "w-16 h-16 rounded-full flex items-center justify-center transition-all",
+              isRecording && recordingMode === "screen"
+                ? "bg-destructive shadow-lg"
+                : "bg-secondary hover:shadow-lg hover:scale-105"
+            )}
+            disabled
+          >
+            {isRecording && recordingMode === "screen" ? <Square className="h-6 w-6" /> : <FileAudio className="h-6 w-6" />}
+          </button>
+        </div>
 
         {isRecording && (
-          <div className="flex items-center gap-2 animate-fade-in">
-            <span className="w-2 h-2 rounded-full bg-destructive animate-pulse-dot" />
-            <span className="text-sm font-mono text-foreground">{formatTime(recordingTime)}</span>
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-destructive animate-pulse" />
+            <span className="text-sm font-mono">{formatTime(recordingTime)}</span>
           </div>
         )}
 
         <p className="text-sm text-muted-foreground">
-          {isRecording ? "Grabando... Pulsa para detener" : "Pulsa para comenzar a grabar"}
+          {isRecording ? "Grabando... Pulsa para detener" : "Pulsa el micrófono para grabar"}
         </p>
       </div>
 
-      {/* Divider */}
       <div className="flex items-center gap-3 my-4">
         <div className="flex-1 h-px bg-border" />
-        <span className="text-xs text-muted-foreground uppercase tracking-wider">o</span>
+        <span className="text-xs text-muted-foreground">o</span>
         <div className="flex-1 h-px bg-border" />
       </div>
 
-      {/* Import */}
-      <div className="border-2 border-dashed border-border rounded-xl p-8 text-center hover:border-primary/50 transition-colors cursor-pointer group">
-        <Upload className="h-8 w-8 text-muted-foreground mx-auto mb-2 group-hover:text-primary transition-colors" />
-        <p className="text-sm font-medium text-foreground">Arrastra un archivo aquí</p>
-        <p className="text-xs text-muted-foreground mt-1">MP3, WAV, MP4, WebM — máx 500MB</p>
-        <Button variant="outline" size="sm" className="mt-3">
-          <FileAudio className="h-4 w-4 mr-1" />
-          Seleccionar archivo
-        </Button>
+      <div 
+        className="border-2 border-dashed border-border rounded-xl p-6 text-center hover:border-primary/50 transition-colors"
+        onClick={() => fileInputRef.current?.click()}
+      >
+        <Upload className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
+        {selectedFile ? (
+          <div className="flex items-center justify-center gap-2">
+            <FileAudio className="h-4 w-4" />
+            <span className="text-sm">{selectedFile.name}</span>
+            <button onClick={(e) => { e.stopPropagation(); setSelectedFile(null); }} className="p-1">
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        ) : (
+          <>
+            <p className="text-sm font-medium">Arrastra un archivo aquí</p>
+            <p className="text-xs text-muted-foreground">MP3, WAV, MP4, WebM — solo audio/vídeo</p>
+          </>
+        )}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="audio/*,video/*"
+          onChange={handleFileSelect}
+          className="hidden"
+        />
       </div>
 
-      {/* Meeting title */}
-      <div className="mt-4">
-        <Input placeholder="Nombre de la reunión (opcional)" className="bg-background" />
+      <div className="mt-4 space-y-3">
+        <Input 
+          placeholder="Nombre de la reunión (opcional)" 
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          className="bg-background"
+        />
+        <Button 
+          className="w-full" 
+          onClick={handleUpload}
+          disabled={!selectedFile || uploading}
+        >
+          {uploading ? "Subiendo..." : "Subir archivo"}
+        </Button>
       </div>
     </div>
   );

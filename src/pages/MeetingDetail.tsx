@@ -90,6 +90,9 @@ export default function MeetingDetail() {
   })() : null;
 
   const sentiment = sentimentConfig[analysis?.sentiment || "neutral"];
+  
+  const progress = analysis?.progress || null;
+  const isChunkProcessing = progress && analysis?.total && analysis?.total > 1;
 
   useEffect(() => {
     fetchMeeting();
@@ -263,7 +266,19 @@ export default function MeetingDetail() {
         )}
 
         {/* Status banner */}
-        {isProcessing && (
+        {isChunkProcessing ? (
+          <div className="glass-card rounded-xl p-6 mb-5 text-center">
+            <Loader2 className="h-8 w-8 animate-spin text-primary mx-auto mb-3" />
+            <p className="text-foreground font-semibold">Analizando grabación larga...</p>
+            <p className="text-sm text-muted-foreground mt-1">Procesando chunk {progress} de {analysis?.total}</p>
+            <div className="w-full max-w-xs mx-auto mt-3 h-2 bg-secondary rounded-full overflow-hidden">
+              <div 
+                className="h-full bg-primary transition-all duration-300" 
+                style={{ width: `${(progress / analysis?.total) * 100}%` }} 
+              />
+            </div>
+          </div>
+        ) : isProcessing && (
           <div className="glass-card rounded-xl p-6 mb-5 text-center">
             <Loader2 className="h-8 w-8 animate-spin text-primary mx-auto mb-3" />
             <p className="text-foreground font-semibold">Analizando grabación...</p>
