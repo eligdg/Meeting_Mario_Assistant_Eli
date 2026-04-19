@@ -30,6 +30,7 @@ import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { useGoogleDrive } from "@/hooks/useGoogleDrive";
+import { compressAndChunk } from "@/lib/audioProcessor";
 import { toast } from "sonner";
 import { format } from "date-fns";
 import { es } from "date-fns/locale";
@@ -130,20 +131,64 @@ export default function MeetingDetail() {
   }
 
   async function handleReanalyze() {
-    if (!meeting) return;
+    if (!meeting || !user) return;
 
-    const isLegacyLargeUpload = (!meeting.chunk_paths || meeting.chunk_paths.length === 0)
-      && (meeting.file_size || 0) > 8 * 1024 * 1024;
-
-    if (isLegacyLargeUpload) {
-      toast.error("Esta grabación es anterior al sistema por partes", {
-        description: "Para analizarla sin errores, vuelve a subir el archivo desde el cargador actual para que se comprima y trocee automáticamente.",
-      });
-      return;
-    }
+    const needsRecompression = (!meeting.chunk_paths || meeting.chunk_paths.length === 0)
+      && (meeting.file_size || 0) > 7 * 1024 * 1024;
 
     setAnalyzing(true);
     try {
+      if (needsRecompression) {
+        if (!meeting.file_path) throw new Error("La grabación no tiene archivo asociado");
+
+        toast.info("Preparando grabación antigua...", {
+          description: "Descargando y recomprimiendo en tu navegador. Puede tardar unos minutos.",
+        });
+
+        // 1) Download legacy file from storage
+        const { data: dlData, error: dlError } = await supabase.storage
+          .from("recordings")
+          .download(meeting.file_path);
+        if (dlError || !dlData) throw new Error(dlError?.message || "No se pudo descargar la grabación");
+
+        // 2) Compress + chunk in browser
+        const chunks = await compressAndChunk(dlData, {
+          onProgress: (stage, pct) => console.log(`[reanalyze] ${stage} ${pct.toFixed(0)}%`),
+        });
+
+        // 3) Upload chunks to a new folder
+        const baseFolder = `${user.id}/${Date.now()}-recompressed`;
+        const chunkPaths: string[] = [];
+        for (const chunk of chunks) {
+          const chunkPath = `${baseFolder}/chunk_${chunk.index}.mp3`;
+          toast.info(`Subiendo parte ${chunk.index + 1}/${chunk.total}...`, {
+            description: `${(chunk.blob.size / 1024 / 1024).toFixed(1)} MB`,
+          });
+          const { error: upErr } = await supabase.storage
+            .from("recordings")
+            .upload(chunkPath, chunk.blob, { contentType: "audio/mpeg", upsert: true });
+          if (upErr) throw upErr;
+          chunkPaths.push(chunkPath);
+        }
+
+        const totalSize = chunks.reduce((s, c) => s + c.blob.size, 0);
+        const totalDuration = chunks.reduce((s, c) => s + c.durationSeconds, 0);
+
+        // 4) Update meeting row with new chunks
+        const { error: updErr } = await supabase
+          .from("meetings")
+          .update({
+            chunk_paths: chunkPaths,
+            file_path: chunkPaths[0],
+            file_size: totalSize,
+            mime_type: "audio/mpeg",
+            duration_seconds: totalDuration || meeting.duration_seconds,
+            status: "pending",
+          })
+          .eq("id", meeting.id);
+        if (updErr) throw updErr;
+      }
+
       const { error } = await supabase.functions.invoke("analyze-meeting", {
         body: { meeting_id: meeting.id },
       });
