@@ -61,7 +61,7 @@ interface MeetingData {
   chunk_paths?: string[] | null;
   file_size?: number | null;
 }
-...
+
   async function handleReanalyze() {
     if (!meeting) return;
 
