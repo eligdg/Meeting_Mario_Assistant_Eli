@@ -37,7 +37,8 @@ Deno.serve(async (req) => {
   const tokens = await tokenRes.json();
 
   if (!tokenRes.ok) {
-    return new Response(`Token exchange failed: ${JSON.stringify(tokens)}`, { status: 500 });
+    console.error("Token exchange failed:", tokens);
+    return new Response("Authentication failed", { status: 500 });
   }
 
   const supabase = createClient(
@@ -63,7 +64,8 @@ Deno.serve(async (req) => {
   );
 
   if (error) {
-    return new Response(`DB error: ${error.message}`, { status: 500 });
+    console.error("DB error saving calendar tokens:", error);
+    return new Response("Internal server error", { status: 500 });
   }
 
   // Redirect back to app

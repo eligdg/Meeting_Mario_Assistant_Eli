@@ -107,8 +107,12 @@ serve(async (req) => {
     }
 
     if (action === "list") {
-      const folderId = body.folder_id || "root";
-      const q = body.query || "";
+      const rawFolderId = String(body.folder_id || "root");
+      // Validate folder_id: must be 'root' or Google Drive ID pattern
+      const folderId = /^(root|[a-zA-Z0-9_-]{10,})$/.test(rawFolderId) ? rawFolderId : "root";
+      // Sanitize query: strip backslashes and single quotes to prevent Drive query injection
+      const rawQ = String(body.query || "");
+      const q = rawQ.replace(/\\/g, "").replace(/'/g, "").slice(0, 100);
       const mimeFilter = body.audio_only
         ? " and (mimeType contains 'audio/' or mimeType contains 'video/')"
         : "";
@@ -281,7 +285,7 @@ serve(async (req) => {
     });
   } catch (error: any) {
     console.error("Google Drive sync error:", error);
-    return new Response(JSON.stringify({ error: error.message }), {
+    return new Response(JSON.stringify({ error: "Internal server error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
