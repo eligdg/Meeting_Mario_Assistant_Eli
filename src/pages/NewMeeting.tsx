@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useRecorder } from "@/hooks/useRecorder";
 import { useGoogleDrive } from "@/hooks/useGoogleDrive";
+import { compressAndChunk } from "@/lib/audioProcessor";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
@@ -99,8 +100,12 @@ export default function NewMeeting() {
   };
 
   const handleSave = async () => {
-    if (!user) {
+    // Source of truth: ask Supabase directly to avoid useAuth timing issues
+    const { data: { user: currentUser } } = await supabase.auth.getUser();
+    const activeUser = currentUser || user;
+    if (!activeUser) {
       toast.error("Debes iniciar sesión");
+      navigate("/auth");
       return;
     }
 
@@ -112,44 +117,56 @@ export default function NewMeeting() {
 
     setSaving(true);
     try {
-      const ext = blob.type.includes("video") ? "webm" : blob.type.includes("mp3") ? "mp3" : blob.type.includes("wav") ? "wav" : "webm";
-      const fileName = `${user.id}/${Date.now()}.${ext}`;
-
-      // Upload to storage
-      const { error: uploadError } = await supabase.storage
-        .from("recordings")
-        .upload(fileName, blob, { contentType: blob.type });
-
-      if (uploadError) throw uploadError;
-
-      // Create meeting record
       const recordingType = uploadedFile ? "upload" : (recorder.mode || "mic");
       const meetingTitle = title.trim() || (uploadedFile ? uploadedFile.name.replace(/\.[^/.]+$/, "") : "Grabación " + new Date().toLocaleString("es"));
 
+      toast.info("Procesando audio...", {
+        description: "Comprimiendo y troceando para la IA. Puede tardar.",
+      });
+
+      const chunks = await compressAndChunk(blob, {
+        onProgress: (stage, pct) => console.log(`[new-meeting] ${stage} ${pct.toFixed(0)}%`),
+      });
+
+      const baseFolder = `${activeUser.id}/${Date.now()}`;
+      const chunkPaths: string[] = [];
+      for (const chunk of chunks) {
+        const chunkPath = `${baseFolder}/chunk_${chunk.index}.mp3`;
+        toast.info(`Subiendo parte ${chunk.index + 1}/${chunk.total}...`, {
+          description: `${(chunk.blob.size / 1024 / 1024).toFixed(1)} MB`,
+        });
+        const { error: upErr } = await supabase.storage
+          .from("recordings")
+          .upload(chunkPath, chunk.blob, { contentType: "audio/mpeg", upsert: true });
+        if (upErr) throw upErr;
+        chunkPaths.push(chunkPath);
+      }
+
+      const totalSize = chunks.reduce((s, c) => s + c.blob.size, 0);
+      const totalDuration = chunks.reduce((s, c) => s + c.durationSeconds, 0);
+
       const { data: meetingData, error: dbError } = await supabase.from("meetings").insert({
-        user_id: user.id,
+        user_id: activeUser.id,
         title: meetingTitle,
         recording_type: recordingType,
-        duration_seconds: recorder.elapsed || null,
-        file_path: fileName,
-        file_size: blob.size,
-        mime_type: blob.type,
+        duration_seconds: totalDuration || recorder.elapsed || null,
+        file_path: chunkPaths[0],
+        chunk_paths: chunkPaths,
+        file_size: totalSize,
+        mime_type: "audio/mpeg",
         status: "pending",
       }).select("id").single();
 
       if (dbError) throw dbError;
 
-      toast.success("Reunión guardada", { description: "Analizando con IA..." });
+      toast.success("Reunión guardada", { description: "Analizando con IA en segundo plano..." });
 
-      // Trigger AI analysis in background
       supabase.functions.invoke("analyze-meeting", {
         body: { meeting_id: meetingData.id },
       }).then(({ error: aiError }) => {
         if (aiError) {
           console.error("AI analysis error:", aiError);
-          toast.error("Error en el análisis IA");
-        } else {
-          toast.success("Análisis iniciado", { description: "Resumen, tareas y eventos se generarán cuando termine el proceso." });
+          toast.error("Error en el análisis IA", { description: aiError.message });
         }
       });
 
