@@ -47,6 +47,20 @@ const sentimentConfig: Record<string, { label: string; color: string; emoji: str
   negativo: { label: "Negativo", color: "text-destructive", emoji: "😟" },
 };
 
+interface Analysis {
+  summary: string;
+  tasks: { text: string; assignee?: string; priority: string; due_date?: string; done?: boolean }[];
+  decisions: { text: string; participants?: string[] }[];
+  risks: { text: string; severity: string }[];
+  sentiment: string;
+  key_data: { label: string; value: string }[];
+  tags: string[];
+  calendar_events: { title: string; date: string; time?: string; duration_minutes?: number; description?: string }[];
+  progress?: number;
+  total?: number;
+  status?: string;
+}
+
 interface MeetingData {
   id: string;
   title: string;
