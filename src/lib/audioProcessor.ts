@@ -114,9 +114,9 @@ export async function compressAndChunk(
       "-c", "copy",
       partName,
     ]);
-    const partData = await ff.readFile(partName);
+    const partData = (await ff.readFile(partName)) as Uint8Array;
     chunks.push({
-      blob: new Blob([partData], { type: "audio/mpeg" }),
+      blob: new Blob([partData.buffer as ArrayBuffer], { type: "audio/mpeg" }),
       index: i,
       total: numChunks,
       durationSeconds: Math.min(secondsPerChunk, totalSeconds - start),
