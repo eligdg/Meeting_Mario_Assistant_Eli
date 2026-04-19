@@ -155,6 +155,7 @@ export type Database = {
       meetings: {
         Row: {
           ai_summary: string | null
+          chunk_paths: string[] | null
           created_at: string
           duration_seconds: number | null
           file_path: string | null
@@ -170,6 +171,7 @@ export type Database = {
         }
         Insert: {
           ai_summary?: string | null
+          chunk_paths?: string[] | null
           created_at?: string
           duration_seconds?: number | null
           file_path?: string | null
@@ -185,6 +187,7 @@ export type Database = {
         }
         Update: {
           ai_summary?: string | null
+          chunk_paths?: string[] | null
           created_at?: string
           duration_seconds?: number | null
           file_path?: string | null

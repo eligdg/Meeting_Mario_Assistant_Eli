@@ -6,9 +6,7 @@ const corsHeaders = {
 };
 
 const MAX_RETRIES = 2;
-// Hard cap: beyond this we refuse rather than risk OOM in the worker (~256MB RAM).
-// 30MB raw audio -> ~40MB base64; safe to keep in memory once.
-const MAX_FILE_MB = 8;
+const MAX_CHUNK_MB = 8; // safety cap per chunk
 
 interface AnalysisResult {
   transcript: string;
@@ -45,41 +43,51 @@ const ANALYSIS_TOOL = {
   },
 };
 
-function buildPrompt(today: string): string {
-  return `Hoy es ${today}. Analiza este audio/vídeo de una reunión. Devuelve transcripción completa, resumen, tareas (con responsable, prioridad, fecha si aplica), decisiones, riesgos, sentimiento, datos clave, etiquetas y eventos de calendario detectados.`;
+async function blobToBase64DataUrl(blob: Blob, mimeType: string): Promise<string> {
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  const chunkSize = 32768;
+  for (let i = 0; i < buf.length; i += chunkSize) {
+    const sub = buf.subarray(i, Math.min(i + chunkSize, buf.length));
+    let s = "";
+    for (let j = 0; j < sub.length; j++) s += String.fromCharCode(sub[j]);
+    binary += s;
+  }
+  const b64 = btoa(binary);
+  return `data:${mimeType};base64,${b64}`;
 }
 
 async function callAI(
-  imageUrl: string,
+  dataUrl: string,
   today: string,
-  apiKey: string
+  apiKey: string,
+  partLabel: string
 ): Promise<AnalysisResult | null> {
+  const prompt = `Hoy es ${today}. ${partLabel} Analiza este audio de reunión. Devuelve transcripción literal, resumen, tareas (responsable, prioridad, fecha si aplica), decisiones, riesgos, sentimiento, datos clave, etiquetas y eventos de calendario detectados. Si es una parte intermedia, transcribe lo que oigas aunque empiece o termine a media frase.`;
+
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const response = await fetch(
-        "https://ai.gateway.lovable.dev/v1/chat/completions",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: "google/gemini-2.5-flash",
-            messages: [
-              {
-                role: "user",
-                content: [
-                  { type: "image_url", image_url: { url: imageUrl } },
-                  { type: "text", text: buildPrompt(today) },
-                ],
-              },
-            ],
-            tools: [ANALYSIS_TOOL],
-            tool_choice: { type: "function", function: { name: "analyze_meeting" } },
-          }),
-        }
-      );
+      const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "image_url", image_url: { url: dataUrl } },
+                { type: "text", text: prompt },
+              ],
+            },
+          ],
+          tools: [ANALYSIS_TOOL],
+          tool_choice: { type: "function", function: { name: "analyze_meeting" } },
+        }),
+      });
 
       if (!response.ok) {
         const errText = await response.text().catch(() => "");
@@ -95,9 +103,7 @@ async function callAI(
       if (data.error) throw new Error(data.error.message || "AI error");
 
       const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
-      if (toolCall) {
-        return JSON.parse(toolCall.function.arguments);
-      }
+      if (toolCall) return JSON.parse(toolCall.function.arguments);
       const content = data.choices?.[0]?.message?.content || "";
       return JSON.parse(content.replace(/```json?\n?/g, "").replace(/```/g, "").trim());
     } catch (e) {
@@ -112,10 +118,38 @@ async function callAI(
   return null;
 }
 
-Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
+function mergeResults(results: AnalysisResult[]): AnalysisResult {
+  if (results.length === 1) return results[0];
+  const merged: AnalysisResult = {
+    transcript: results.map((r) => r.transcript).join("\n\n"),
+    summary: results.map((r, i) => `**Parte ${i + 1}:** ${r.summary}`).join("\n\n"),
+    tasks: [],
+    decisions: [],
+    risks: [],
+    sentiment: "neutral",
+    key_data: [],
+    tags: [],
+    calendar_events: [],
+  };
+  for (const r of results) {
+    merged.tasks.push(...(r.tasks || []));
+    merged.decisions.push(...(r.decisions || []));
+    merged.risks.push(...(r.risks || []));
+    merged.key_data.push(...(r.key_data || []));
+    merged.tags.push(...(r.tags || []));
+    merged.calendar_events.push(...(r.calendar_events || []));
   }
+  // Most common sentiment
+  const counts: Record<string, number> = { positivo: 0, neutral: 0, mixto: 0, negativo: 0 };
+  for (const r of results) if (counts[r.sentiment] !== undefined) counts[r.sentiment]++;
+  merged.sentiment = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+  // Dedupe tags
+  merged.tags = Array.from(new Set(merged.tags));
+  return merged;
+}
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
     const authHeader = req.headers.get("Authorization");
@@ -173,7 +207,11 @@ Deno.serve(async (req) => {
       });
     }
 
-    if (!meeting.file_path) {
+    const paths: string[] = (meeting.chunk_paths && meeting.chunk_paths.length > 0)
+      ? meeting.chunk_paths
+      : (meeting.file_path ? [meeting.file_path] : []);
+
+    if (paths.length === 0) {
       await supabase.from("meetings").update({ status: "error" }).eq("id", meeting_id);
       return new Response(JSON.stringify({ error: "No file attached" }), {
         status: 400,
@@ -192,76 +230,77 @@ Deno.serve(async (req) => {
       });
     }
 
-    const fileSizeMB = (meeting.file_size || 0) / 1024 / 1024;
     const today = new Date().toISOString().split("T")[0];
-    const mimeType = meeting.mime_type || "audio/webm";
+    const mimeType = meeting.mime_type || "audio/mpeg";
+    const results: AnalysisResult[] = [];
 
-    if (fileSizeMB > MAX_FILE_MB) {
-      await supabase.from("meetings").update({ status: "error" }).eq("id", meeting_id);
-      return new Response(
-        JSON.stringify({
-          error: `Archivo demasiado grande (${fileSizeMB.toFixed(1)} MB). Máximo soportado: ${MAX_FILE_MB} MB. Comprime el audio antes de subirlo.`,
-        }),
-        { status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    for (let i = 0; i < paths.length; i++) {
+      const chunkPath = paths[i];
+      const partLabel = paths.length > 1 ? `[Parte ${i + 1} de ${paths.length}]` : "";
+
+      // Update progress in DB so the UI can show it
+      await supabase.from("meetings").update({
+        ai_summary: JSON.stringify({ progress: i, total: paths.length, status: "processing_chunk" }),
+      }).eq("id", meeting_id);
+
+      const { data: fileData, error: fileError } = await supabase.storage
+        .from("recordings")
+        .download(chunkPath);
+
+      if (fileError || !fileData) {
+        console.error(`Failed to download chunk ${i}:`, fileError);
+        continue;
+      }
+
+      const sizeMB = fileData.size / 1024 / 1024;
+      if (sizeMB > MAX_CHUNK_MB) {
+        console.error(`Chunk ${i} too large: ${sizeMB.toFixed(1)} MB`);
+        continue;
+      }
+
+      try {
+        const dataUrl = await blobToBase64DataUrl(fileData, mimeType);
+        const result = await callAI(dataUrl, today, LOVABLE_API_KEY, partLabel);
+        if (result) results.push(result);
+      } catch (e) {
+        console.error(`Chunk ${i} analysis failed:`, e);
+      }
+
+      // Force GC hint by clearing reference
+      // (Deno doesn't expose explicit gc, but losing references helps)
     }
 
-    // Download and inline as base64 data URL (Gemini accepts audio in data URLs)
-    const { data: fileData, error: fileError } = await supabase.storage
-      .from("recordings")
-      .download(meeting.file_path);
-
-    if (fileError || !fileData) {
+    if (results.length === 0) {
       await supabase.from("meetings").update({ status: "error" }).eq("id", meeting_id);
-      return new Response(JSON.stringify({ error: "Could not download file" }), {
+      return new Response(JSON.stringify({ error: "AI analysis failed for all chunks" }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const buf = new Uint8Array(await fileData.arrayBuffer());
-    let binary = "";
-    const chunkSize = 32768;
-    for (let i = 0; i < buf.length; i += chunkSize) {
-      const sub = buf.subarray(i, Math.min(i + chunkSize, buf.length));
-      // Build a small string per chunk without creating an Array (saves memory).
-      let s = "";
-      for (let j = 0; j < sub.length; j++) s += String.fromCharCode(sub[j]);
-      binary += s;
-    }
-    const b64 = btoa(binary);
-    binary = ""; // free
-    const imageUrl = `data:${mimeType};base64,${b64}`;
-
-    const result = await callAI(imageUrl, today, LOVABLE_API_KEY);
-
-    if (!result) {
-      await supabase.from("meetings").update({ status: "error" }).eq("id", meeting_id);
-      return new Response(JSON.stringify({ error: "AI analysis failed" }), {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+    const finalAnalysis = mergeResults(results);
 
     const aiSummary = JSON.stringify({
-      summary: result.summary,
-      tasks: result.tasks || [],
-      decisions: result.decisions || [],
-      risks: result.risks || [],
-      sentiment: result.sentiment || "neutral",
-      key_data: result.key_data || [],
-      tags: result.tags || [],
-      calendar_events: result.calendar_events || [],
+      summary: finalAnalysis.summary,
+      tasks: finalAnalysis.tasks || [],
+      decisions: finalAnalysis.decisions || [],
+      risks: finalAnalysis.risks || [],
+      sentiment: finalAnalysis.sentiment || "neutral",
+      key_data: finalAnalysis.key_data || [],
+      tags: finalAnalysis.tags || [],
+      calendar_events: finalAnalysis.calendar_events || [],
+      processed_chunks: results.length,
+      total_chunks: paths.length,
     });
 
     await supabase.from("meetings").update({
-      transcript: result.transcript,
+      transcript: finalAnalysis.transcript,
       ai_summary: aiSummary,
       status: "completed",
     }).eq("id", meeting_id);
 
     // Auto-create calendar events
-    const calendarEvents = result.calendar_events || [];
+    const calendarEvents = finalAnalysis.calendar_events || [];
     const createdEvents: string[] = [];
     for (const evt of calendarEvents) {
       try {
@@ -286,9 +325,11 @@ Deno.serve(async (req) => {
     return new Response(
       JSON.stringify({
         success: true,
-        summary: result.summary,
-        tasks_count: (result.tasks || []).length,
+        summary: finalAnalysis.summary,
+        tasks_count: (finalAnalysis.tasks || []).length,
         events_created: createdEvents.length,
+        chunks_processed: results.length,
+        chunks_total: paths.length,
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );

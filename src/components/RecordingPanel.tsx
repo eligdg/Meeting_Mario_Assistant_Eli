@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
+import { compressAndChunk } from "@/lib/audioProcessor";
 
 export function RecordingPanel() {
   const { toast } = useToast();
@@ -127,19 +128,39 @@ export function RecordingPanel() {
       if (!user) throw new Error("No autenticado");
 
       const sizeMB = file.size / 1024 / 1024;
-      if (sizeMB > 200) {
-        throw new Error(`Archivo demasiado grande (${sizeMB.toFixed(1)} MB). Máximo 200 MB.`);
+      if (sizeMB > 500) {
+        throw new Error(`Archivo demasiado grande (${sizeMB.toFixed(1)} MB). Máximo 500 MB.`);
       }
 
-      const ext = mimeType.includes("video") ? "webm" : "webm";
-      const fileName = `recording-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
-      const filePath = `${user.id}/${fileName}`;
+      // Compress + chunk in the browser so the AI edge function never gets >7MB
+      toast({
+        title: "Procesando audio...",
+        description: "Comprimiendo y troceando para la IA. Puede tardar.",
+      });
 
-      toast({ title: `Subiendo ${sizeMB.toFixed(1)} MB...`, description: "Puede tardar según tu conexión" });
-      await uploadWithRetry(filePath, file, mimeType);
+      const chunks = await compressAndChunk(file, {
+        onProgress: (stage, pct) => {
+          console.log(`[audio] ${stage} ${pct.toFixed(0)}%`);
+        },
+      });
 
-      const duration = recordingMode ? recordingTime : Math.round((file.size / 1024 / 1024) * 2);
+      const totalDuration = chunks.reduce((s, c) => s + c.durationSeconds, 0);
       const meetingTitle = title || `Grabación ${new Date().toLocaleString("es-ES")}`;
+      const baseFolder = `${user.id}/${Date.now()}`;
+
+      // Upload all chunks
+      const chunkPaths: string[] = [];
+      for (const chunk of chunks) {
+        const chunkPath = `${baseFolder}/chunk_${chunk.index}.mp3`;
+        toast({
+          title: `Subiendo parte ${chunk.index + 1}/${chunk.total}...`,
+          description: `${(chunk.blob.size / 1024 / 1024).toFixed(1)} MB`,
+        });
+        await uploadWithRetry(chunkPath, chunk.blob, "audio/mpeg");
+        chunkPaths.push(chunkPath);
+      }
+
+      const totalSize = chunks.reduce((s, c) => s + c.blob.size, 0);
 
       const { data: meeting, error: dbError } = await supabase
         .from("meetings")
@@ -147,10 +168,11 @@ export function RecordingPanel() {
           user_id: user.id,
           title: meetingTitle,
           recording_type: recordingMode === "screen" ? "screen" : "mic",
-          file_path: filePath,
-          file_size: file.size,
-          mime_type: mimeType,
-          duration_seconds: duration,
+          file_path: chunkPaths[0], // first chunk for backwards compat
+          chunk_paths: chunkPaths,
+          file_size: totalSize,
+          mime_type: "audio/mpeg",
+          duration_seconds: totalDuration || (recordingMode ? recordingTime : null),
           status: "pending",
         })
         .select()
@@ -158,7 +180,11 @@ export function RecordingPanel() {
 
       if (dbError) throw dbError;
 
-      toast({ title: "Archivo subido", description: "Iniciando análisis con IA..." });
+      toast({
+        title: chunks.length > 1
+          ? `Subido (${chunks.length} partes). Analizando con IA...`
+          : "Archivo subido. Analizando con IA...",
+      });
 
       // Trigger AI analysis automatically
       supabase.functions.invoke("analyze-meeting", {
