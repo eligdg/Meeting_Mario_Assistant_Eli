@@ -119,11 +119,11 @@ export function AppSidebar() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-sidebar-accent-foreground truncate">
-                  {user?.user_metadata?.full_name || user?.email?.split("@")[0] || "Usuario"}
+                  Mario
                 </p>
-                <button onClick={signOut} className="text-xs text-sidebar-foreground hover:text-sidebar-accent-foreground truncate">
-                  Cerrar sesión
-                </button>
+                <p className="text-xs text-sidebar-foreground truncate">
+                  Meeting Assistant
+                </p>
               </div>
             </div>
           </div>
