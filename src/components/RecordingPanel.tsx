@@ -99,6 +99,26 @@ export function RecordingPanel() {
     setSelectedFile(file);
   };
 
+  const uploadWithRetry = async (filePath: string, file: Blob, mimeType: string, maxRetries = 3) => {
+    let lastErr: any;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const { error } = await supabase.storage
+          .from("recordings")
+          .upload(filePath, file, { contentType: mimeType, upsert: attempt > 1 });
+        if (!error) return;
+        lastErr = error;
+      } catch (e) {
+        lastErr = e;
+      }
+      if (attempt < maxRetries) {
+        toast({ title: `Reintentando subida (${attempt}/${maxRetries})...` });
+        await new Promise(r => setTimeout(r, 2000 * attempt));
+      }
+    }
+    throw lastErr || new Error("Fallo al subir tras varios intentos");
+  };
+
   const uploadFile = async (file: Blob, mimeType: string) => {
     setUploading(true);
 
@@ -106,15 +126,17 @@ export function RecordingPanel() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("No autenticado");
 
+      const sizeMB = file.size / 1024 / 1024;
+      if (sizeMB > 200) {
+        throw new Error(`Archivo demasiado grande (${sizeMB.toFixed(1)} MB). Máximo 200 MB.`);
+      }
+
       const ext = mimeType.includes("video") ? "webm" : "webm";
       const fileName = `recording-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
       const filePath = `${user.id}/${fileName}`;
 
-      const { error: uploadError } = await supabase.storage
-        .from("recordings")
-        .upload(filePath, file, { contentType: mimeType });
-
-      if (uploadError) throw uploadError;
+      toast({ title: `Subiendo ${sizeMB.toFixed(1)} MB...`, description: "Puede tardar según tu conexión" });
+      await uploadWithRetry(filePath, file, mimeType);
 
       const duration = recordingMode ? recordingTime : Math.round((file.size / 1024 / 1024) * 2);
       const meetingTitle = title || `Grabación ${new Date().toLocaleString("es-ES")}`;
