@@ -191,6 +191,38 @@ export function RecordingPanel() {
         body: { meeting_id: meeting.id },
       }).catch((e) => console.error("Analyze trigger failed:", e));
 
+      // Auto-export to Google Drive if enabled
+      try {
+        const { data: driveStatus } = await supabase.functions.invoke("google-drive-sync", {
+          body: { action: "status" },
+        });
+        if (driveStatus?.connected) {
+          const { data: settingsData } = await supabase.functions.invoke("google-drive-sync", {
+            body: { action: "get_settings" },
+          });
+          const s = settingsData?.settings;
+          if (s?.auto_export_recordings) {
+            toast({ title: "Subiendo a Google Drive..." });
+            // Concatenate chunks into a single blob for Drive
+            const merged = new Blob(chunks.map(c => c.blob), { type: "audio/mpeg" });
+            const base64 = await blobToBase64(merged);
+            await supabase.functions.invoke("google-drive-sync", {
+              body: {
+                action: "upload",
+                file_name: `${meetingTitle}.mp3`,
+                mime_type: "audio/mpeg",
+                file_data: base64,
+                folder_id: s.drive_folder_id || undefined,
+              },
+            });
+            toast({ title: "Subida a Drive completada" });
+          }
+        }
+      } catch (e) {
+        console.error("Drive auto-export failed:", e);
+        toast({ title: "Aviso", description: "No se pudo subir a Drive automáticamente", variant: "destructive" });
+      }
+
       setSelectedFile(null);
       setTitle("");
     } catch (err: any) {
