@@ -186,7 +186,7 @@ serve(async (req) => {
       }
 
       // Multipart upload
-      const boundary = "---lovable-boundary---";
+      const boundary = "---mma-boundary---";
       const metadataBody = JSON.stringify(metadata);
 
       const parts = [

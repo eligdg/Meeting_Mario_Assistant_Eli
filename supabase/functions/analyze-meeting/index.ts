@@ -67,27 +67,35 @@ async function callAI(
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "google/gemini-2.5-flash",
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "image_url", image_url: { url: dataUrl } },
-                { type: "text", text: prompt },
-              ],
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  { inline_data: { mime_type: dataUrl.split(";")[0].split(":")[1], data: dataUrl.split(",")[1] } },
+                  { text: prompt },
+                ],
+              },
+            ],
+            tools: [
+              {
+                function_declarations: [ANALYSIS_TOOL.function],
+              },
+            ],
+            tool_config: {
+              function_calling_config: {
+                allowed_function_names: ["analyze_meeting"],
+              },
             },
-          ],
-          tools: [ANALYSIS_TOOL],
-          tool_choice: { type: "function", function: { name: "analyze_meeting" } },
-        }),
-      });
+          }),
+        }
+      );
 
       if (!response.ok) {
         const errText = await response.text().catch(() => "");
@@ -102,10 +110,15 @@ async function callAI(
       const data = await response.json();
       if (data.error) throw new Error(data.error.message || "AI error");
 
-      const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
-      if (toolCall) return JSON.parse(toolCall.function.arguments);
-      const content = data.choices?.[0]?.message?.content || "";
-      return JSON.parse(content.replace(/```json?\n?/g, "").replace(/```/g, "").trim());
+      const fnCall = data.candidates?.[0]?.content?.parts?.[0]?.functionCall;
+      if (fnCall && fnCall.name === "analyze_meeting") {
+        return fnCall.args as AnalysisResult;
+      }
+      const textContent = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      if (textContent) {
+        return JSON.parse(textContent.replace(/```json?\n?/g, "").replace(/```/g, "").trim());
+      }
+      throw new Error("No function call or text in AI response");
     } catch (e) {
       console.error(`AI attempt ${attempt + 1} failed:`, e);
       if (attempt < MAX_RETRIES) {
@@ -221,8 +234,8 @@ Deno.serve(async (req) => {
 
     await supabase.from("meetings").update({ status: "processing" }).eq("id", meeting_id);
 
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) {
+    const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
+    if (!GEMINI_API_KEY) {
       await supabase.from("meetings").update({ status: "error" }).eq("id", meeting_id);
       return new Response(JSON.stringify({ error: "AI not configured" }), {
         status: 500,
@@ -293,7 +306,7 @@ Deno.serve(async (req) => {
 
       try {
         const dataUrl = await blobToBase64DataUrl(blob, mimeType);
-        const result = await callAI(dataUrl, today, LOVABLE_API_KEY, label);
+        const result = await callAI(dataUrl, today, GEMINI_API_KEY, label);
         if (result) results.push(result);
       } catch (e) {
         console.error(`Piece ${i} analysis failed:`, e);
